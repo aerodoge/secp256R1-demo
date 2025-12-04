@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Passkey Wallet - ERC20 转账</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #fff;
+            padding: 20px;
+        }
+        .container { max-width: 600px; margin: 0 auto; }
+        h1 { text-align: center; margin-bottom: 10px; font-size: 24px; }
+        .subtitle { text-align: center; color: rgba(255,255,255,0.6); margin-bottom: 30px; font-size: 14px; }
+        .card {
+            background: rgba(255,255,255,0.1);
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 20px;
+            backdrop-filter: blur(10px);
+        }
+        .card h2 { font-size: 18px; margin-bottom: 16px; color: #4fc3f7; }
+        button {
+            width: 100%;
+            padding: 14px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin-bottom: 10px;
+        }
+        .btn-primary { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
+        .btn-success { background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); color: white; }
+        .btn-warning { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: white; }
+        .btn-orange { background: linear-gradient(135deg, #f5af19 0%, #f12711 100%); color: white; }
+        button:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(102,126,234,0.4); }
+        button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+        input {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 8px;
+            background: rgba(0,0,0,0.2);
+            color: white;
+            font-size: 14px;
+            margin-bottom: 12px;
+        }
+        input::placeholder { color: rgba(255,255,255,0.5); }
+        .status { padding: 12px; border-radius: 8px; margin-bottom: 12px; font-size: 14px; }
+        .status.success { background: rgba(76,175,80,0.2); border: 1px solid #4caf50; }
+        .status.error { background: rgba(244,67,54,0.2); border: 1px solid #f44336; }
+        .status.info { background: rgba(33,150,243,0.2); border: 1px solid #2196f3; }
+        label { display: block; font-size: 14px; margin-bottom: 6px; color: rgba(255,255,255,0.7); }
+        .config-info {
+            font-size: 12px; color: rgba(255,255,255,0.5); margin-bottom: 20px;
+            padding: 10px; background: rgba(0,0,0,0.2); border-radius: 8px;
+        }
+        .tx-link { color: #4fc3f7; text-decoration: none; }
+        .tx-link:hover { text-decoration: underline; }
+        .wallet-info {
+            background: rgba(0,0,0,0.3); padding: 12px; border-radius: 8px;
+            margin-bottom: 12px; font-size: 13px; word-break: break-all;
+        }
+        .step-badge {
+            display: inline-block; width: 24px; height: 24px; border-radius: 50%;
+            background: #667eea; text-align: center; line-height: 24px;
+            font-size: 12px; font-weight: bold; margin-right: 8px;
+        }
+        .balance-info {
+            background: rgba(0,0,0,0.2); padding: 12px; border-radius: 8px;
+            margin-bottom: 12px; font-size: 14px;
+        }
+        code { background: rgba(0,0,0,0.3); padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Passkey Wallet</h1>
+        <p class="subtitle">基于 secp256r1 (EIP-7951) 的智能合约钱包</p>
+
+        <div class="config-info" id="configInfo">加载配置中...</div>
+
+        <!-- 步骤 1: 注册 Passkey 并创建钱包 -->
+        <div class="card">
+            <h2><span class="step-badge">1</span>创建 Passkey 钱包</h2>
+            <p style="margin-bottom: 16px; color: rgba(255,255,255,0.7); font-size: 14px;">
+                注册 Passkey 后，系统会为你部署一个智能合约钱包
+            </p>
+
+            <input type="text" id="username" placeholder="输入用户名 (可选)" />
+            <button class="btn-primary" onclick="createWallet()" id="createWalletBtn">
+                注册 Passkey 并创建钱包
+            </button>
+            <div id="walletStatus"></div>
+
+            <div class="wallet-info" id="walletInfo" style="display: none;">
+                <strong>你的钱包地址:</strong><br>
+                <code id="walletAddress">-</code>
+                <p style="margin-top: 8px; font-size: 12px; color: rgba(255,255,255,0.5);">
+                    请向此地址转入代币后再进行转账
+                </p>
+            </div>
+
+            <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,0.1);">
+                <p style="font-size: 12px; color: rgba(255,255,255,0.5); margin-bottom: 8px;">已有钱包？手动输入:</p>
+                <input type="text" id="manualWallet" placeholder="钱包合约地址 0x..." />
+                <button class="btn-warning" onclick="setManualWallet()" style="font-size: 14px; padding: 10px;">
+                    设置钱包地址
+                </button>
+            </div>
+        </div>
+
+        <!-- 步骤 2: 获取测试代币 -->
+        <div class="card">
+            <h2><span class="step-badge">2</span>获取测试代币</h2>
+
+            <button class="btn-orange" onclick="connectMetaMask()" id="connectBtn">
+                连接 MetaMask
+            </button>
+            <div id="metamaskInfo" style="display: none; margin: 12px 0; font-size: 13px;">
+                EOA 地址: <code id="eoaAddress">-</code>
+            </div>
+
+            <label>代币合约地址</label>
+            <input type="text" id="tokenAddress" placeholder="0x..." value="0xEca6eD1fB1b4afBD99E1380983C022021B6cC316" />
+
+            <div style="display: flex; gap: 10px;">
+                <button class="btn-warning" onclick="faucet()" id="faucetBtn" disabled style="flex: 1;">
+                    领取测试币 (Faucet)
+                </button>
+                <button class="btn-primary" onclick="depositToWallet()" id="depositBtn" disabled style="flex: 1;">
+                    转入钱包
+                </button>
+            </div>
+            <div id="faucetStatus"></div>
+
+            <div style="margin-top: 12px;">
+                <button class="btn-warning" onclick="checkBalance()" style="font-size: 14px; padding: 10px;">查询余额</button>
+            </div>
+            <div class="balance-info" id="balanceInfo">连接 MetaMask 后查询余额</div>
+        </div>
+
+        <!-- 步骤 3: 转账 -->
+        <div class="card">
+            <h2><span class="step-badge">3</span>Passkey 签名转账</h2>
+
+            <label>接收地址</label>
+            <input type="text" id="toAddress" placeholder="0x..." />
+
+            <label>转账金额</label>
+            <input type="text" id="amount" placeholder="1.0" />
+
+            <button class="btn-success" onclick="signAndTransfer()" id="transferBtn" disabled>
+                签名并转账 (指纹/Face ID)
+            </button>
+            <div id="transferStatus"></div>
+        </div>
+
+        <!-- 结果展示 -->
+        <div class="card" id="resultCard" style="display: none;">
+            <h2>交易结果</h2>
+            <div id="resultContent"></div>
+        </div>
+    </div>
+
+    <script>
+        // 全局状态
+        let credential = null;
+        let credentialId = null; // Base64URL 编码的 credential ID
+        let publicKeyData = null;
+        let walletAddress = null;
+        let serverConfig = null;
+        let tokenDecimals = 18;
+        let tokenSymbol = 'TOKEN';
+        let eoaAddress = null; // MetaMask 地址
+
+        const API_BASE = '';
+
+        // 初始化
+        async function init() {
+            try {
+                const resp = await fetch(API_BASE + '/api/config');
+                serverConfig = await resp.json();
+                document.getElementById('configInfo').innerHTML =
+                    `Factory 合约: <code>${serverConfig.contract}</code><br>链 ID: ${serverConfig.chainId}`;
+            } catch (e) {
+                document.getElementById('configInfo').innerHTML =
+                    '<span style="color: #f44336;">无法连接后端服务</span>';
+            }
+
+            // 检查是否有保存的钱包地址
+            const saved = localStorage.getItem('passkeyWallet');
+            if (saved) {
+                const data = JSON.parse(saved);
+                walletAddress = data.wallet;
+                publicKeyData = data.publicKey;
+                credentialId = data.credentialId; // 恢复 credential ID
+                showWalletInfo();
+            }
+        }
+
+        // 显示钱包信息
+        function showWalletInfo() {
+            document.getElementById('walletInfo').style.display = 'block';
+            document.getElementById('walletAddress').textContent = walletAddress;
+            document.getElementById('createWalletBtn').textContent = '已创建钱包';
+            document.getElementById('createWalletBtn').disabled = true;
+            document.getElementById('transferBtn').disabled = false;
+        }
+
+        // 连接 MetaMask
+        async function connectMetaMask() {
+            if (typeof window.ethereum === 'undefined') {
+                alert('请安装 MetaMask');
+                return;
+            }
+
+            try {
+                const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+                eoaAddress = accounts[0];
+
+                // 切换到 Sepolia 网络
+                try {
+                    await window.ethereum.request({
+                        method: 'wallet_switchEthereumChain',
+                        params: [{ chainId: '0xaa36a7' }]
+                    });
+                } catch (e) {
+                    console.log('切换网络:', e);
+                }
+
+                document.getElementById('metamaskInfo').style.display = 'block';
+                document.getElementById('eoaAddress').textContent = eoaAddress.slice(0, 10) + '...' + eoaAddress.slice(-6);
+                document.getElementById('connectBtn').textContent = '已连接';
+                document.getElementById('connectBtn').disabled = true;
+                document.getElementById('faucetBtn').disabled = false;
+                document.getElementById('depositBtn').disabled = false;
+
+                checkBalance();
+            } catch (error) {
+                alert('连接失败: ' + error.message);
+            }
+        }
+
+        // 领取测试币
+        async function faucet() {
+            if (!eoaAddress) {
+                alert('请先连接 MetaMask');
+                return;
+            }
+
+            const token = document.getElementById('tokenAddress').value;
+            if (!token) {
+                alert('请输入代币地址');
+                return;
+            }
+
+            showStatus('faucetStatus', '请在 MetaMask 中确认...', 'info');
+
+            try {
+                // 调用 faucet() 函数
+                const txHash = await window.ethereum.request({
+                    method: 'eth_sendTransaction',
+                    params: [{
+                        from: eoaAddress,
+                        to: token,
+                        data: '0xde5f72fd' // faucet() 函数选择器
+                    }]
+                });
+
+                const txLink = `https://sepolia.etherscan.io/tx/${txHash}`;
+                showStatus('faucetStatus',
+                    `✓ Faucet 交易已发送!<br><a href="${txLink}" target="_blank" class="tx-link">${txHash.slice(0,20)}...</a>`,
+                    'success');
+
+                // 等待后刷新余额
+                setTimeout(checkBalance, 5000);
+
+            } catch (error) {
+                showStatus('faucetStatus', `✗ 失败: ${error.message}`, 'error');
+            }
+        }
+
+        // 转入钱包
+        async function depositToWallet() {
+            if (!eoaAddress) {
+                alert('请先连接 MetaMask');
+                return;
+            }
+            if (!walletAddress) {
+                alert('请先创建或设置钱包地址');
+                return;
+            }
+
+            const token = document.getElementById('tokenAddress').value;
+            if (!token) {
+                alert('请输入代币地址');
+                return;
+            }
+
+            // 先查询 EOA 余额
+            const resp = await fetch(`${API_BASE}/api/balance?token=${token}&address=${eoaAddress}`);
+            const data = await resp.json();
+            if (!data.success || data.balance === '0') {
+                alert('你的 EOA 没有代币，请先领取测试币');
+                return;
+            }
+
+            const amount = prompt(`转入多少代币到钱包？\n你的 EOA 余额: ${formatBalance(data.balance, data.decimals || 18)} ${data.symbol || 'TOKEN'}`, '100');
+            if (!amount) return;
+
+            const amountWei = BigInt(Math.floor(parseFloat(amount) * (10 ** (data.decimals || 18))));
+
+            showStatus('faucetStatus', '请在 MetaMask 中确认转账...', 'info');
+
+            try {
+                // ERC20 transfer(address to, uint256 amount)
+                const transferData = '0xa9059cbb' +
+                    walletAddress.slice(2).padStart(64, '0') +
+                    amountWei.toString(16).padStart(64, '0');
+
+                const txHash = await window.ethereum.request({
+                    method: 'eth_sendTransaction',
+                    params: [{
+                        from: eoaAddress,
+                        to: token,
+                        data: transferData
+                    }]
+                });
+
+                const txLink = `https://sepolia.etherscan.io/tx/${txHash}`;
+                showStatus('faucetStatus',
+                    `✓ 转入钱包交易已发送!<br><a href="${txLink}" target="_blank" class="tx-link">${txHash.slice(0,20)}...</a>`,
+                    'success');
+
+                setTimeout(checkBalance, 5000);
+
+            } catch (error) {
+                showStatus('faucetStatus', `✗ 失败: ${error.message}`, 'error');
+            }
+        }
+
+        // 手动设置钱包地址
+        function setManualWallet() {
+            const addr = document.getElementById('manualWallet').value;
+            if (!addr || !addr.startsWith('0x')) {
+                alert('请输入有效的钱包地址');
+                return;
+            }
+
+            walletAddress = addr;
+            // 不设置 credentialId，签名时使用可发现凭证
+            localStorage.setItem('passkeyWallet', JSON.stringify({
+                wallet: walletAddress,
+                publicKey: null,
+                credentialId: null
+            }));
+
+            showWalletInfo();
+            showStatus('walletStatus', '✓ 钱包地址已设置，转账时会自动查找 Passkey', 'success');
+        }
+
+        // 工具函数
+        function bufferToHex(buffer) {
+            return '0x' + Array.from(new Uint8Array(buffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        function bufferToBase64URL(buffer) {
+            const bytes = new Uint8Array(buffer);
+            let str = '';
+            for (const byte of bytes) str += String.fromCharCode(byte);
+            return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+        }
+
+        function showStatus(elementId, message, type) {
+            document.getElementById(elementId).innerHTML = `<div class="status ${type}">${message}</div>`;
+        }
+
+        function parseCOSEPublicKey(coseKey) {
+            const bytes = new Uint8Array(coseKey);
+            let x, y;
+            const xIndex = bytes.indexOf(0x21);
+            const yIndex = bytes.indexOf(0x22);
+            if (xIndex !== -1 && yIndex !== -1) {
+                x = bytes.slice(xIndex + 3, xIndex + 35);
+                y = bytes.slice(yIndex + 3, yIndex + 35);
+            } else if (bytes[0] === 0x04 && bytes.length === 65) {
+                x = bytes.slice(1, 33);
+                y = bytes.slice(33, 65);
+            } else {
+                throw new Error('无法解析公钥格式');
+            }
+            return { x: bufferToHex(x), y: bufferToHex(y) };
+        }
+
+        function parseAttestationObject(buffer) {
+            const bytes = new Uint8Array(buffer);
+            const authDataKey = [0x68, 0x61, 0x75, 0x74, 0x68, 0x44, 0x61, 0x74, 0x61];
+            let authDataStart = -1;
+            for (let i = 0; i < bytes.length - authDataKey.length; i++) {
+                let match = true;
+                for (let j = 0; j < authDataKey.length; j++) {
+                    if (bytes[i + j] !== authDataKey[j]) { match = false; break; }
+                }
+                if (match) {
+                    authDataStart = i + authDataKey.length;
+                    if (bytes[authDataStart] === 0x58) authDataStart += 2;
+                    else if (bytes[authDataStart] === 0x59) authDataStart += 3;
+                    break;
+                }
+            }
+            if (authDataStart === -1) throw new Error('无法找到 authData');
+            const credIdLen = (bytes[authDataStart + 53] << 8) | bytes[authDataStart + 54];
+            return { publicKey: bytes.slice(authDataStart + 55 + credIdLen) };
+        }
+
+        function parseDERSignature(derBuffer) {
+            const bytes = new Uint8Array(derBuffer);
+            if (bytes[0] !== 0x30) throw new Error('Invalid DER signature');
+            let offset = 2;
+            if (bytes[offset] !== 0x02) throw new Error('Invalid DER signature');
+            offset++;
+            const rLen = bytes[offset]; offset++;
+            let r = bytes.slice(offset, offset + rLen); offset += rLen;
+            if (bytes[offset] !== 0x02) throw new Error('Invalid DER signature');
+            offset++;
+            const sLen = bytes[offset]; offset++;
+            let s = bytes.slice(offset, offset + sLen);
+            return { r: padTo32Bytes(r), s: padTo32Bytes(s) };
+        }
+
+        function padTo32Bytes(bytes) {
+            if (bytes.length === 32) return bytes;
+            if (bytes.length > 32) return bytes.slice(bytes.length - 32);
+            const padded = new Uint8Array(32);
+            padded.set(bytes, 32 - bytes.length);
+            return padded;
+        }
+
+        // 创建钱包
+        async function createWallet() {
+            const username = document.getElementById('username').value || 'passkey-user';
+
+            try {
+                // 第一步：注册 Passkey
+                showStatus('walletStatus', '请使用指纹或 Face ID 验证...', 'info');
+
+                const challenge = new Uint8Array(32);
+                crypto.getRandomValues(challenge);
+                const userId = new Uint8Array(16);
+                crypto.getRandomValues(userId);
+
+                credential = await navigator.credentials.create({
+                    publicKey: {
+                        challenge,
+                        rp: { name: "Passkey Wallet", id: window.location.hostname },
+                        user: { id: userId, name: username, displayName: username },
+                        pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+                        authenticatorSelection: {
+                            authenticatorAttachment: "platform",
+                            userVerification: "required",
+                            residentKey: "preferred"
+                        },
+                        timeout: 60000,
+                        attestation: "none"
+                    }
+                });
+
+                const authData = parseAttestationObject(credential.response.attestationObject);
+                publicKeyData = parseCOSEPublicKey(authData.publicKey);
+                credentialId = bufferToBase64URL(credential.rawId);
+
+                showStatus('walletStatus', `✓ Passkey 注册成功!<br>正在创建钱包合约...`, 'info');
+
+                // 第二步：调用后端创建钱包
+                const resp = await fetch(API_BASE + '/api/create-wallet', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ publicKey: publicKeyData })
+                });
+                const result = await resp.json();
+
+                if (result.success) {
+                    const txLink = `https://sepolia.etherscan.io/tx/${result.txHash}`;
+                    showStatus('walletStatus',
+                        `✓ 钱包创建交易已发送!<br>` +
+                        `<a href="${txLink}" target="_blank" class="tx-link">${result.txHash.slice(0,20)}...</a><br>` +
+                        `<small>请等待交易确认后，在 Etherscan 的事件日志中查看钱包地址</small>`,
+                        'success');
+
+                    // 提示用户输入钱包地址
+                    setTimeout(() => {
+                        const addr = prompt('请从 Etherscan 事件日志中复制你的钱包地址 (WalletCreated 事件):');
+                        if (addr && addr.startsWith('0x')) {
+                            walletAddress = addr;
+                            localStorage.setItem('passkeyWallet', JSON.stringify({
+                                wallet: walletAddress,
+                                publicKey: publicKeyData,
+                                credentialId: credentialId
+                            }));
+                            showWalletInfo();
+                        }
+                    }, 3000);
+                } else {
+                    showStatus('walletStatus', `✗ 创建失败: ${result.message}`, 'error');
+                }
+
+            } catch (error) {
+                showStatus('walletStatus', `✗ 错误: ${error.message}`, 'error');
+            }
+        }
+
+        // 查询余额
+        async function checkBalance() {
+            const token = document.getElementById('tokenAddress').value;
+            if (!token) {
+                document.getElementById('balanceInfo').innerHTML = '请输入代币地址';
+                return;
+            }
+
+            try {
+                let html = '';
+
+                // 查询 EOA 余额
+                if (eoaAddress) {
+                    const eoaResp = await fetch(`${API_BASE}/api/balance?token=${token}&address=${eoaAddress}`);
+                    const eoaData = await eoaResp.json();
+                    if (eoaData.success) {
+                        tokenSymbol = eoaData.symbol || 'TOKEN';
+                        tokenDecimals = eoaData.decimals || 18;
+                        html += `<strong>${tokenSymbol}</strong><br>`;
+                        html += `你的 EOA: <strong>${formatBalance(eoaData.balance, tokenDecimals)}</strong><br>`;
+                    }
+                }
+
+                // 查询钱包余额
+                if (walletAddress) {
+                    const walletResp = await fetch(`${API_BASE}/api/balance?token=${token}&address=${walletAddress}`);
+                    const walletData = await walletResp.json();
+                    if (walletData.success) {
+                        tokenSymbol = walletData.symbol || tokenSymbol || 'TOKEN';
+                        tokenDecimals = walletData.decimals || tokenDecimals || 18;
+                        if (!html) html += `<strong>${tokenSymbol}</strong><br>`;
+                        html += `智能钱包: <strong>${formatBalance(walletData.balance, tokenDecimals)}</strong>`;
+                    }
+                }
+
+                if (!html) {
+                    html = '请先连接 MetaMask 或创建钱包';
+                }
+
+                document.getElementById('balanceInfo').innerHTML = html;
+            } catch (e) {
+                document.getElementById('balanceInfo').innerHTML = `查询失败: ${e.message}`;
+            }
+        }
+
+        function formatBalance(balance, decimals) {
+            if (!balance || balance === '0') return '0';
+            const bal = BigInt(balance);
+            const div = BigInt(10 ** decimals);
+            const intPart = bal / div;
+            const fracPart = bal % div;
+            if (fracPart === 0n) return intPart.toString();
+            const fracStr = fracPart.toString().padStart(decimals, '0').slice(0, 4);
+            return `${intPart}.${fracStr}`;
+        }
+
+        // Base64URL 转 ArrayBuffer
+        function base64URLToBuffer(base64url) {
+            const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+            const padding = '='.repeat((4 - base64.length % 4) % 4);
+            const binary = atob(base64 + padding);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+                bytes[i] = binary.charCodeAt(i);
+            }
+            return bytes.buffer;
+        }
+
+        // Passkey 签名
+        async function doSign() {
+            const message = JSON.stringify({
+                action: 'transfer',
+                wallet: walletAddress,
+                token: document.getElementById('tokenAddress').value,
+                to: document.getElementById('toAddress').value,
+                amount: document.getElementById('amount').value,
+                timestamp: Date.now(),
+                random: Math.random().toString(36).substring(7)
+            });
+
+            const messageBuffer = new TextEncoder().encode(message);
+            const messageHash = await crypto.subtle.digest('SHA-256', messageBuffer);
+            const challenge = new Uint8Array(messageHash);
+
+            // 构建凭证请求参数
+            const publicKeyOptions = {
+                challenge,
+                rpId: window.location.hostname,
+                userVerification: "required",
+                timeout: 60000
+            };
+
+            // 如果有保存的 credentialId，指定它；否则使用可发现凭证
+            if (credential) {
+                publicKeyOptions.allowCredentials = [{ type: "public-key", id: credential.rawId }];
+            } else if (credentialId) {
+                publicKeyOptions.allowCredentials = [{ type: "public-key", id: base64URLToBuffer(credentialId) }];
+            }
+            // 不指定 allowCredentials = 使用可发现凭证，浏览器会列出所有可用的 Passkey
+
+            const assertion = await navigator.credentials.get({ publicKey: publicKeyOptions });
+
+            const authenticatorData = assertion.response.authenticatorData;
+            const clientDataJSON = assertion.response.clientDataJSON;
+            const { r, s } = parseDERSignature(assertion.response.signature);
+
+            const clientDataHash = await crypto.subtle.digest('SHA-256', clientDataJSON);
+            const signedData = new Uint8Array(authenticatorData.byteLength + 32);
+            signedData.set(new Uint8Array(authenticatorData), 0);
+            signedData.set(new Uint8Array(clientDataHash), authenticatorData.byteLength);
+            const finalHash = await crypto.subtle.digest('SHA-256', signedData);
+
+            return {
+                publicKey: publicKeyData ? { x: publicKeyData.x, y: publicKeyData.y } : { x: '0x', y: '0x' },
+                signature: { r: bufferToHex(r), s: bufferToHex(s) },
+                webauthn: {
+                    authenticatorData: bufferToHex(authenticatorData),
+                    clientDataJSON: bufferToBase64URL(clientDataJSON),
+                    messageHash: bufferToHex(finalHash)
+                }
+            };
+        }
+
+        // 签名并转账
+        async function signAndTransfer() {
+            if (!walletAddress) {
+                showStatus('transferStatus', '请先设置钱包地址', 'error');
+                return;
+            }
+
+            const token = document.getElementById('tokenAddress').value;
+            const to = document.getElementById('toAddress').value;
+            const amountStr = document.getElementById('amount').value;
+
+            if (!token || !to || !amountStr) {
+                showStatus('transferStatus', '请填写所有字段', 'error');
+                return;
+            }
+
+            try {
+                showStatus('transferStatus', '请使用指纹或 Face ID 验证...', 'info');
+                const signData = await doSign();
+
+                const amount = (BigInt(Math.floor(parseFloat(amountStr) * (10 ** tokenDecimals)))).toString();
+
+                const transferData = {
+                    ...signData,
+                    wallet: walletAddress,
+                    token: token,
+                    to: to,
+                    amount: amount
+                };
+
+                showStatus('transferStatus', '正在发送交易...', 'info');
+
+                const resp = await fetch(API_BASE + '/api/transfer', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(transferData)
+                });
+                const result = await resp.json();
+
+                if (result.success) {
+                    const txLink = `https://sepolia.etherscan.io/tx/${result.txHash}`;
+                    showStatus('transferStatus',
+                        `✓ 转账交易已发送!<br><a href="${txLink}" target="_blank" class="tx-link">${result.txHash.slice(0,20)}...</a>`,
+                        'success');
+                    showResult(result.txHash);
+                    setTimeout(checkBalance, 5000);
+                } else {
+                    showStatus('transferStatus', `✗ 转账失败: ${result.message}`, 'error');
+                }
+            } catch (error) {
+                showStatus('transferStatus', `✗ 错误: ${error.message}`, 'error');
+            }
+        }
+
+        function showResult(txHash) {
+            const txLink = `https://sepolia.etherscan.io/tx/${txHash}`;
+            document.getElementById('resultCard').style.display = 'block';
+            document.getElementById('resultContent').innerHTML =
+                `<p>交易哈希:</p>` +
+                `<div style="background: rgba(0,0,0,0.3); padding: 12px; border-radius: 8px; font-family: monospace; font-size: 11px; word-break: break-all;">${txHash}</div>` +
+                `<p style="margin-top: 12px;"><a href="${txLink}" target="_blank" class="tx-link">在 Etherscan 上查看 →</a></p>`;
+        }
+
+        window.addEventListener('load', init);
+    </script>
+</body>
+</html>
