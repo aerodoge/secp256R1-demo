@@ -238,9 +238,474 @@ contract PasskeyWalletFactory {
 | 属性     | 值                                                |
 |--------|--------------------------------------------------|
 | 地址     | `0x0000000000000000000000000000000000000100`     |
-| Gas 消耗 | 6,900                                            |
+| Gas 消耗 | 3,450 (成功) / 6,900 (最大)                          |
 | 输入格式   | 160 字节: hash(32) + r(32) + s(32) + x(32) + y(32) |
 | 输出格式   | 有效: 32字节值为1，无效: 空字节                              |
+
+### 4.4 预编译合约详解
+
+#### 什么是预编译合约
+
+预编译合约 (Precompiled Contract) 是 EVM 内置的特殊合约：
+
+```
+普通合约:
+┌──────────┐     编译      ┌──────────┐     EVM 执行
+│ Solidity │ ──────────→  │ 字节码    │ ──────────→ 结果
+└──────────┘              └──────────┘
+
+预编译合约:
+┌──────────┐     直接调用    ┌──────────────┐
+│ 输入数据  │ ──────────→   │ 原生代码      │ → 结果
+└──────────┘               │ (Go/Rust/C)  │
+                           └──────────────┘
+
+特点:
+- 不是Solidity代码，是EVM客户端内置的原生代码
+- 固定地址 (0x01-0x0a 是标准预编译，0x100是P256VERIFY)
+- 没有ABI/函数选择器，直接接收原始数据
+- 执行效率高，Gas成本低
+```
+
+#### EVM 标准预编译合约列表
+
+| 地址        | 名称             | 功能                 | Gas            |
+|-----------|----------------|--------------------|----------------|
+| 0x01      | ecRecover      | 从签名恢复 secp256k1 地址 | 3,000          |
+| 0x02      | SHA256         | SHA-256 哈希         | 60 + 12/word   |
+| 0x03      | RIPEMD160      | RIPEMD-160 哈希      | 600 + 120/word |
+| 0x04      | identity       | 数据复制 (memcpy)      | 15 + 3/word    |
+| 0x05      | modexp         | 大数模幂运算             | 动态计算           |
+| 0x06      | ecAdd          | BN254 曲线点加法        | 150            |
+| 0x07      | ecMul          | BN254 曲线标量乘法       | 6,000          |
+| 0x08      | ecPairing      | BN254 配对检查 (ZK证明)  | 动态计算           |
+| 0x09      | blake2f        | BLAKE2 压缩函数        | 动态计算           |
+| **0x100** | **P256VERIFY** | **secp256r1 签名验证** | **3,450**      |
+
+#### 为什么 staticcall 不需要函数选择器
+
+```solidity
+// 普通合约调用 - 需要函数选择器
+token.call(abi.encodeWithSignature("transfer(address,uint256)", to, amount));
+//         ↑ 前 4 字节是函数选择器: 0xa9059cbb
+//         ↑ = keccak256("transfer(address,uint256)")[0:4]
+
+// 预编译合约调用 - 直接传原始数据，无函数选择器
+P256VERIFY.staticcall(abi.encodePacked(hash, r, s, x, y));
+//                    ↑ 160 字节纯数据，无选择器
+```
+
+```
+原因:
+- 普通合约可能有多个函数，需要选择器区分
+- 预编译合约只有一个功能，不需要选择器
+- 输入格式由 EIP 规范定义
+```
+
+#### P256VERIFY 输入输出格式
+
+```
+输入 (160 字节，紧凑编码):
+┌────────────────────────────────────────────────────────────┐
+│ 偏移    │ 长度      │ 内容                                  │
+├────────────────────────────────────────────────────────────┤
+│ 0       │ 32 字节   │ message_hash (消息哈希)                │
+│ 32      │ 32 字节   │ r (签名 r 值)                         │
+│ 64      │ 32 字节   │ s (签名 s 值)                         │
+│ 96      │ 32 字节   │ x (公钥 x 坐标)                       │
+│ 128     │ 32 字节   │ y (公钥 y 坐标)                       │
+└────────────────────────────────────────────────────────────┘
+
+输出:
+┌────────────────────────────────────────────────────────────┐
+│ 签名有效   │ 32 字节，值为 1                                 │
+│ 签名无效   │ 空 (length = 0)                                │
+│ 输入错误   │ 空 (length = 0)                                │
+└────────────────────────────────────────────────────────────┘
+```
+
+#### Solidity 调用代码解析
+
+```solidity
+function verifySignature(
+    bytes32 hash,
+    bytes32 r,
+    bytes32 s
+) public view returns (bool) {
+    // staticcall: 只读调用，不修改状态 (适合 view 函数)
+    // P256VERIFY: 预编译合约地址 0x100
+    // abi.encodePacked: 紧凑编码，参数直接拼接，无填充
+    (bool success, bytes memory result) = P256VERIFY.staticcall(
+        abi.encodePacked(hash, r, s, publicKeyX, publicKeyY)
+    //              ↑ 32 + 32 + 32 + 32 + 32 = 160 字节
+    );
+
+    // success: 调用是否成功 (gas 足够、地址有效等)
+    //          注意: 签名无效时 success 仍为 true，但 result 为空
+    // result:  返回的数据
+
+    if (!success || result.length == 0) {
+        return false;  // 调用失败 或 签名无效
+    }
+
+    // 解码返回值，检查是否为 1
+    return abi.decode(result, (uint256)) == 1;
+}
+```
+
+#### staticcall vs call vs delegatecall
+
+| 调用方式         | 修改状态 | 发送 ETH | msg.sender | 存储上下文 |
+|--------------|------|--------|------------|-------|
+| call         | 可以   | 可以     | 调用者        | 被调用合约 |
+| staticcall   | 不可以  | 不可以    | 调用者        | 被调用合约 |
+| delegatecall | 可以   | 不可以    | 原始调用者      | 当前合约  |
+
+#### go-ethereum 中 P256VERIFY 的实现
+
+```go
+// go-ethereum/core/vm/contracts.go (简化版)
+
+// 预编译合约注册表
+var PrecompiledContractsCancun = map[common.Address]PrecompiledContract{
+common.BytesToAddress([]byte{1}):   &ecrecover{},
+common.BytesToAddress([]byte{2}):   &sha256hash{},
+common.BytesToAddress([]byte{3}):   &ripemd160hash{},
+// ...
+common.BytesToAddress([]byte{0x01, 0x00}): &p256Verify{}, // 0x100
+}
+
+// P256VERIFY 预编译合约实现
+type p256Verify struct{}
+
+// RequiredGas 返回所需 gas
+func (c *p256Verify) RequiredGas(input []byte) uint64 {
+return 3450 // EIP-7212 定义的 gas 成本
+}
+
+// Run 执行签名验证
+func (c *p256Verify) Run(input []byte) ([]byte, error) {
+// 1. 检查输入长度必须是 160 字节
+if len(input) != 160 {
+return nil, nil // 返回空，表示验证失败
+}
+
+// 2. 解析输入数据
+hash := input[0:32]
+r := new(big.Int).SetBytes(input[32:64])
+s := new(big.Int).SetBytes(input[64:96])
+x := new(big.Int).SetBytes(input[96:128])
+y := new(big.Int).SetBytes(input[128:160])
+
+// 3. 构造 P-256 公钥
+pubKey := &ecdsa.PublicKey{
+Curve: elliptic.P256(), // secp256r1 曲线
+X:     x,
+Y:     y,
+}
+
+// 4. 验证公钥是否在曲线上
+if !pubKey.Curve.IsOnCurve(x, y) {
+return nil, nil // 无效公钥
+}
+
+// 5. 调用 Go 标准库验证 ECDSA 签名
+if ecdsa.Verify(pubKey, hash, r, s) {
+// 验证成功: 返回 32 字节，值为 1
+return common.LeftPadBytes([]byte{1}, 32), nil
+}
+
+// 验证失败: 返回空
+return nil, nil
+}
+```
+
+#### 完整调用路径: Solidity → EVM → p256Verify.Run()
+
+下面是从 Solidity `staticcall` 到 Go `p256Verify.Run()` 的完整调用链：
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 1. Solidity 代码                                                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│ P256VERIFY.staticcall(abi.encodePacked(hash, r, s, x, y))               │
+│                                                                         │
+│ 编译成 EVM 字节码 (简化):                                                  │
+│ ; 准备输入数据到内存...                                                    │
+│ PUSH 0x20         ; retSize (返回32字节)         ← 先push，在栈底         │
+│ PUSH 0x00         ; retOffset (返回数据存放位置)                          │
+│ PUSH 0xA0         ; argsSize (160字节=0xA0)                              │
+│ PUSH 0x00         ; argsOffset (输入数据偏移)                             │
+│ PUSH 0x100        ; addr (P256VERIFY地址)                                │
+│ PUSH 0xFFFF       ; gas                          ← 后push，在栈顶         │
+│ STATICCALL        ; 操作码 0xFA，按顺序pop: gas,addr,argsOff,argsSz...    │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 2. EVM 解释器执行 STATICCALL 操作码                                        │
+├─────────────────────────────────────────────────────────────────────────┤
+│ // core/vm/instructions.go                                              │
+│ func opStaticCall(pc *uint64, evm *EVM, scope *ScopeContext) {          │
+│     stack := scope.Stack                                                │
+│     // 按顺序从栈顶 pop (栈是 LIFO，后进先出)                               │
+│     temp := stack.pop()       // 1. gas (栈顶，最后push的)               │
+│     addr := stack.pop()       // 2. 目标地址 (0x100)                     │
+│     inOffset := stack.pop()   // 3. 输入数据偏移                          │
+│     inSize := stack.pop()     // 4. 输入数据长度 (160)                    │
+│     retOffset := stack.pop()  // 5. 返回数据偏移                          │
+│     retSize := stack.pop()    // 6. 返回数据长度 (栈底，最先push的)         │
+│                                                                         │
+│     toAddr := common.Address(addr.Bytes20())                            │
+│     args := scope.Memory.GetPtr(inOffset, inSize) // 从内存取输入数据      │
+│                                                                         │
+│     // 调用 EVM 的 StaticCall 方法                                       │
+│     ret, returnGas, err := evm.StaticCall(                              │
+│         scope.Contract.Address(),    // 调用者地址                       │
+│         toAddr,                      // 目标地址: 0x100                  │
+│         args,                        // 输入: hash+r+s+x+y (160字节)     │
+│         gas,                                                            │
+│     )                                                                   │
+│ }                                                                       │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 3. EVM.StaticCall 检查是否为预编译合约                                     │
+├─────────────────────────────────────────────────────────────────────────┤
+│ // core/vm/evm.go                                                       │
+│ func (evm *EVM) StaticCall(caller, addr, input, gas) {                  │
+│     // 关键: 检查目标地址是否在预编译合约注册表中                             │
+│     if p, isPrecompile := evm.precompile(addr); isPrecompile {          │
+│         // 是预编译合约，直接调用 RunPrecompiledContract                   │
+│         ret, gas, err = RunPrecompiledContract(p, input, gas, tracer)   │
+│     } else {                                                            │
+│         // 普通合约，创建合约实例并执行字节码                                │
+│         contract := NewContract(...)                                    │
+│         ret, err = evm.interpreter.Run(contract, input, true)           │
+│     }                                                                   │
+│ }                                                                       │
+│                                                                         │
+│ // 预编译合约注册表查找                                                    │
+│ func (evm *EVM) precompile(addr common.Address) (PrecompiledContract) { │
+│     // PrecompiledContractsCancun 包含 0x100 -> &p256Verify{}           │
+│     return evm.precompiles[addr]                                        │
+│ }                                                                       │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 4. RunPrecompiledContract 执行预编译合约                                   │
+├─────────────────────────────────────────────────────────────────────────┤
+│ // core/vm/contracts.go                                                 │
+│ func RunPrecompiledContract(p PrecompiledContract, input []byte,        │
+│                             suppliedGas uint64, tracer) {               │
+│     // 1. 计算所需 gas                                                   │
+│     gasCost := p.RequiredGas(input)  // p256Verify 返回 3450            │
+│                                                                         │
+│     // 2. 检查 gas 是否足够                                               │
+│     if suppliedGas < gasCost {                                          │
+│         return nil, 0, ErrOutOfGas                                      │
+│     }                                                                   │
+│                                                                         │
+│     // 3. 调用 Run 方法执行实际逻辑                                        │
+│     output, err := p.Run(input)  // ← 这里调用 p256Verify.Run()         │
+│                                                                         │
+│     // 4. 返回结果和剩余 gas                                              │
+│     return output, suppliedGas - gasCost, err                           │
+│ }                                                                       │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 5. p256Verify.Run() 执行 P-256 签名验证                                   │
+├─────────────────────────────────────────────────────────────────────────┤
+│ // core/vm/contracts.go                                                 │
+│ func (c *p256Verify) Run(input []byte) ([]byte, error) {                │
+│     // 解析 160 字节输入                                                  │
+│     hash := input[0:32]                                                 │
+│     r := new(big.Int).SetBytes(input[32:64])                            │
+│     s := new(big.Int).SetBytes(input[64:96])                            │
+│     x := new(big.Int).SetBytes(input[96:128])                           │
+│     y := new(big.Int).SetBytes(input[128:160])                          │
+│                                                                         │
+│     // 构造公钥并验证签名                                                  │
+│     pubKey := &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}      │
+│     if ecdsa.Verify(pubKey, hash, r, s) {                               │
+│         return common.LeftPadBytes([]byte{1}, 32), nil  // 成功返回 1    │
+│     }                                                                   │
+│     return nil, nil  // 失败返回空                                       │
+│ }                                                                       │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**调用链总结:**
+
+```
+Solidity staticcall(0x100, data)
+    ↓ 编译
+EVM 字节码: STATICCALL 0xFA
+    ↓ EVM 解释器执行
+opStaticCall()                     // core/vm/instructions.go
+    ↓
+evm.StaticCall(addr=0x100, input)  // core/vm/evm.go
+    ↓ 查找预编译合约注册表
+evm.precompile(0x100) → &p256Verify{}
+    ↓
+RunPrecompiledContract(p256Verify, input)  // core/vm/contracts.go
+    ↓ 检查 gas，调用 Run
+p256Verify.Run(input)              // 执行 ECDSA 验证
+    ↓
+ecdsa.Verify(pubKey, hash, r, s)   // Go 标准库
+```
+
+**关键点:**
+
+1. **预编译合约注册表**: 节点启动时，预编译合约被注册到一个 `map[Address]PrecompiledContract` 中
+2. **地址检测**: `evm.precompile(addr)` 检查地址是否在注册表中
+3. **跳过 EVM 执行**: 预编译合约直接调用 Go 代码，不执行 EVM 字节码
+4. **统一接口**: 所有预编译合约都实现 `PrecompiledContract` 接口:
+   ```go
+   type PrecompiledContract interface {
+       RequiredGas(input []byte) uint64
+       Run(input []byte) ([]byte, error)
+   }
+   ```
+
+#### EVM 字节码与指令执行
+
+很多人看到合约编译后是一串十六进制数据，会疑惑 "PUSH、STATICCALL 这些指令是什么时候转换的"。
+
+**答案：字节码本身就是指令，不需要转换。**
+
+##### 操作码表 (部分)
+
+| 操作码        | 字节值  | 含义       |
+|------------|------|----------|
+| STOP       | 0x00 | 停止执行     |
+| ADD        | 0x01 | 加法       |
+| PUSH1      | 0x60 | 压入1字节数据  |
+| PUSH2      | 0x61 | 压入2字节数据  |
+| PUSH20     | 0x73 | 压入20字节数据 |
+| PUSH32     | 0x7F | 压入32字节数据 |
+| STATICCALL | 0xFA | 静态调用     |
+| RETURN     | 0xF3 | 返回       |
+
+##### 字节码执行示例
+
+假设编译后的字节码是：
+
+```
+0x60 0x20 0x60 0x00 0x60 0xA0 0x60 0x00 0x61 0x01 0x00 0xFA
+```
+
+EVM 解释器逐字节读取并执行：
+
+```
+字节          解释            栈状态 (右边是栈顶)
+──────────────────────────────────────────────────────
+0x60         PUSH1
+0x20         → 数据          [0x20]
+
+0x60         PUSH1
+0x00         → 数据          [0x20, 0x00]
+
+0x60         PUSH1
+0xA0         → 数据          [0x20, 0x00, 0xA0]
+
+0x60         PUSH1
+0x00         → 数据          [0x20, 0x00, 0xA0, 0x00]
+
+0x61         PUSH2          (下两个字节作为数据)
+0x01 0x00    → 数据 0x100    [0x20, 0x00, 0xA0, 0x00, 0x100]
+
+0xFA         STATICCALL     消耗栈上6个参数，执行调用
+```
+
+##### 编译流程
+
+```
+┌──────────────┐    solc 编译器    ┌──────────────┐    逐字节执行
+│ Solidity     │ ───────────────→ │ 字节码        │ ───────────→ EVM
+│ 源代码        │                  │ (就是指令)    │
+└──────────────┘                  └──────────────┘
+
+示例:
+staticcall(...)  编译→  0x...60 20 60 00 ... FA  执行→  EVM 解释执行
+```
+
+##### go-ethereum 解释器核心循环
+
+```go
+// core/vm/interpreter.go
+func (evm *EVMInterpreter) Run(contract *Contract, input []byte) ([]byte, error) {
+var pc uint64 = 0 // 程序计数器，从第0字节开始
+
+for {
+// 1. 读取当前位置的字节作为操作码
+op := contract.GetOp(pc) // 等价于 contract.Code[pc]
+
+// 2. 从跳转表查找对应的操作函数
+operation := jumpTable[op] // jumpTable[0xFA] → opStaticCall
+
+// 3. 执行该操作
+res, err := operation.execute(&pc, evm, scope)
+if err != nil {
+break
+}
+
+// 4. 移动到下一条指令
+pc++
+}
+}
+```
+
+##### 跳转表 (Jump Table)
+
+跳转表是一个 256 元素的数组，索引就是操作码字节值：
+
+```go
+// core/vm/jump_table.go
+var jumpTable = [256]*operation{
+0x00: {execute: opStop}, // STOP
+0x01: {execute: opAdd}, // ADD
+0x60: {execute: opPush1}, // PUSH1
+0x61: {execute: opPush2}, // PUSH2
+// ...
+0x73: {execute: opPush20}, // PUSH20
+0x7F: {execute: opPush32}, // PUSH32
+// ...
+0xFA: {execute: opStaticCall}, // STATICCALL
+0xF3: {execute: opReturn}, // RETURN
+}
+```
+
+##### 关键理解
+
+| 层级       | 格式    | 示例                           |
+|----------|-------|------------------------------|
+| Solidity | 高级语言  | `staticcall(gas, addr, ...)` |
+| 字节码      | 二进制指令 | `0x60 0x20 ... 0xFA`         |
+| 执行       | 查表调用  | `jumpTable[0xFA].execute()`  |
+
+**EVM 是解释型虚拟机**：逐字节读取字节码，通过跳转表找到对应函数并执行。类似于 Java 的 JVM 执行 `.class` 字节码，没有额外的"
+转换"步骤。
+
+#### 为什么预编译合约比 Solidity 实现便宜
+
+```
+Solidity 实现 P-256 验证:
+- 需要实现大数运算 (256位模乘、模逆)
+- 需要实现椭圆曲线点运算
+- 估计 Gas: 500,000 - 1,000,000
+
+预编译合约:
+- 直接调用 Go/Rust 标准库
+- 利用 CPU 原生 64 位运算
+- 固定 Gas: 3,450
+
+节省: 约 100-300 倍!
+```
 
 ---
 
